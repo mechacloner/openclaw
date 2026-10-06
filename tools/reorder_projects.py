@@ -13,8 +13,12 @@ Usage:
     python3 tools/reorder_projects.py INPUT [-o OUTPUT] [--column NAME]
         [--sheet NAME] [--keep-order]
 
-INPUT may be .xlsx, .xlsm or .csv. Extra columns are carried through untouched
-and no values are modified -- rows are only re-sequenced.
+INPUT may be .xlsx, .xlsm, .csv or .txt. Extra columns are carried through
+untouched and no values are modified -- rows are only re-sequenced.
+
+A .txt input is read as a pasted list: one entry per line, where an entry is
+either just a project number ("AKK.PO.019 (A)") or a number then a name
+separated by a comma / tab / " - " ("AKK.PO.019 (A), Sub-station upgrade").
 """
 
 import argparse
@@ -81,12 +85,38 @@ def read_table(path: Path, sheet: str | None):
         with path.open(newline="", encoding="utf-8-sig") as fh:
             return [row for row in csv.reader(fh)]
 
+    if path.suffix.lower() in (".txt", ".list", ".md"):
+        return read_pasted_list(path)
+
     wb = load_workbook(path, data_only=True)
     ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
     rows = []
     for row in ws.iter_rows(values_only=True):
         rows.append(["" if c is None else c for c in row])
     return rows
+
+
+def read_pasted_list(path: Path):
+    """Parse a pasted list: one project per line, number then optional name."""
+    rows = []
+    with path.open(encoding="utf-8-sig") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Split "NUMBER <sep> NAME" on the first comma, tab, or " - ".
+            parts = None
+            for sep in (",", "\t", ";", " – ", " — ", " - ", "  "):
+                if sep in line:
+                    parts = [p.strip() for p in line.split(sep, 1)]
+                    break
+            if parts is None:
+                parts = [line]
+            rows.append(parts)
+    if not rows:
+        return rows
+    width = max(len(r) for r in rows)
+    return [r + [""] * (width - len(r)) for r in rows]
 
 
 def detect_column(rows, header_row_idx: int, names) -> int:
@@ -193,6 +223,16 @@ def main(argv=None):
     header_idx = None if args.no_header else (
         args.header_row - 1 if args.header_row else find_header_row(rows, ("project no", "proj no", "no.", "number", "code", "id"))
     )
+
+    pasted = args.input.suffix.lower() in (".txt", ".list", ".md")
+    if pasted and args.header_row is None and not args.no_header:
+        # A pasted list has no header line; add usable column titles below.
+        header_idx = None
+        width = max(len(r) for r in rows)
+        titles = ["Project No.", "Description", "Remarks", "Notes"]
+        header = [titles[i] if i < len(titles) else f"Column {i + 1}" for i in range(width)]
+        rows = [header] + rows
+        header_idx = 0
 
     if args.column:
         token = args.column.strip().upper()
